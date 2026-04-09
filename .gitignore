@@ -1,0 +1,4 @@
+.conda-env/
+node_modules/
+src-tauri/target/
+.local-deps/

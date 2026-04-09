@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../.conda-env
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: expat
+Description: Expat XML parser library
+Version: 2.7.1
+Libs: -L${libdir} -lexpat
+Cflags: -I${includedir}

@@ -1,0 +1,35 @@
+[package]
+name = "bitfsd_annotator"
+version = "0.1.0"
+description = "bitfsd desktop point-cloud annotator"
+authors = ["bitfsd"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "bitfsd_annotator_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.0.2", features = [] }
+tauri-codegen = "=2.0.2"
+tauri-utils = "=2.0.2"
+
+[dependencies]
+tauri = { version = "=2.0.2", features = [] }
+tauri-macros = "=2.0.1"
+tauri-runtime = "=2.0.1"
+tauri-runtime-wry = "=2.0.1"
+tauri-utils = "=2.0.2"
+dlopen2_derive = "=0.4.1"
+uuid = "=1.12.0"
+time = "=0.3.44"
+deranged = "=0.5.5"
+url = "=2.5.2"
+unicode-segmentation = "=1.12.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+walkdir = "2"
+rfd = { version = "=0.15.2", default-features = false, features = ["gtk3"] }

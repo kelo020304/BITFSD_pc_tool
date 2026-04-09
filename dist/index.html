@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>点云标注工具 | Point Cloud Annotator</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #080b10;
+      }
+
+      body {
+        color: #f0f6fc;
+        font-family: "Outfit", sans-serif;
+      }
+
+      #boot-status {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background:
+          radial-gradient(circle at top, rgba(88, 166, 255, 0.14), transparent 42%),
+          #080b10;
+      }
+
+      #boot-status[data-state="ready"] {
+        display: none;
+      }
+
+      #boot-status[data-state="error"] .boot-card {
+        border-color: rgba(248, 81, 73, 0.45);
+        background: rgba(36, 16, 18, 0.94);
+      }
+
+      .boot-card {
+        width: min(720px, calc(100vw - 48px));
+        padding: 20px 22px;
+        border-radius: 14px;
+        border: 1px solid rgba(88, 166, 255, 0.25);
+        background: rgba(13, 17, 23, 0.94);
+        box-shadow: 0 16px 60px rgba(0, 0, 0, 0.45);
+      }
+
+      .boot-title {
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .boot-subtitle {
+        margin-top: 8px;
+        font-size: 12px;
+        line-height: 1.6;
+        color: #8b949e;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/index-COt8_I5w.js"></script>
+  </head>
+
+  <body>
+    <div id="boot-status" data-state="loading">
+      <div class="boot-card">
+        <div class="boot-title">bitfsd-annotator booting</div>
+        <div class="boot-subtitle" id="boot-message">Loading frontend entry...</div>
+      </div>
+    </div>
+    <div id="root"></div>
+  </body>
+</html>
