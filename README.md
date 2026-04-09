@@ -142,7 +142,7 @@ npm run build
 > 建议先查看该视频，再进行首次标注操作。
 
 - 操作演示视频  
-![cone annotate demo](assets/videos/cone_annotate.gif)
+![cone annotate demo](assets/videos/cone_annoate.gif)
 
 
 
