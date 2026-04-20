@@ -1,0 +1,39 @@
+name: bitfsd-annotator-web
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.10.*
+  - pip=24.2.*
+  - nodejs=20.19.*
+  - git=2.49.*
+  - fastapi=0.115.*
+  - uvicorn=0.34.*
+  - pydantic=2.10.*
+  - numpy=1.26.*
+  - pyyaml=6.0.*
+  - rosbags=0.10.*
+  - easydict=1.13
+  - llvmlite=0.42.*
+  - numba=0.59.*
+  - scikit-image=0.24.*
+  - tqdm=4.67.*
+  - tensorboardx=2.6.*
+  - pyquaternion=0.9.*
+  - setuptools=75.8.*
+  - wheel
+  - ninja=1.12.*
+  - cmake=3.30.*
+  - make
+  - gcc_linux-64=11.*
+  - gxx_linux-64=11.*
+  - pytorch=2.1.2
+  - torchvision=0.16.2
+  - pytorch-cuda=11.8
+  - cuda-toolkit=11.8
+  - pip:
+      - SharedArray==3.2.4
+      - opencv-python-headless==4.10.0.84
+      - spconv-cu118==2.3.6

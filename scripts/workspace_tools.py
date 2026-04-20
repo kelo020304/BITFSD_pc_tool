@@ -12,9 +12,82 @@ import time
 from pathlib import Path
 
 import numpy as np
+from point_cloud_utils import sanitize_points
 
 HESAI_TOPICS = ["/pandar_points", "/lidar_points", "/hesai/pandar"]
 PROGRESS_MARKER = "@@progress@@ "
+
+
+def _estimate_travel_m(pts_ref: np.ndarray, pts_src: np.ndarray,
+                        voxel_size: float = 0.5, max_iter: int = 20) -> float:
+    """Estimate vehicle travel distance (metres) between two sensor-frame point clouds.
+
+    Both clouds are in sensor/vehicle frame (vehicle at origin each frame).
+    Static scene features (cones, ground) are used as landmarks: ICP finds the
+    rigid transform that aligns the two frames, and the translation magnitude is
+    the vehicle displacement between them.
+
+    Uses 2-D (XY) ICP with SVD-based optimal rotation on a voxel-grid-downsampled
+    representation.  Voxel sampling (default 0.5 m cells) gives uniform spatial
+    coverage regardless of local point density — better ICP correspondence quality
+    than random subsampling.  0.5 m cells keep representative-point position error
+    well below the typical min-travel threshold, while yielding ~300–800 voxel
+    centres for FSD point clouds — keeping each ICP iteration under 10 ms.
+    """
+    def _prep(pts: np.ndarray) -> np.ndarray:
+        xy = pts[:, :2]
+        r = np.linalg.norm(xy, axis=1)
+        xy = xy[(r > 1.5) & (r < 30.0)]
+        if len(xy) == 0:
+            return xy
+        # Voxel grid: keep the first point that falls into each cell
+        keys = (xy / voxel_size).astype(np.int32)
+        _, unique_idx = np.unique(keys, axis=0, return_index=True)
+        return xy[unique_idx]
+
+    ref = _prep(pts_ref)
+    src = _prep(pts_src)
+    if len(ref) < 10 or len(src) < 10:
+        return 0.0
+
+    pts = src.copy()
+    # Accumulated transform: tracks total displacement of src relative to ref
+    R_acc = np.eye(2)
+    t_acc = np.zeros(2)
+
+    for _ in range(max_iter):
+        # Brute-force nearest neighbours — O(M·N) fine for ~300 pts
+        diffs = ref[np.newaxis] - pts[:, np.newaxis]      # (M, N, 2)
+        nn_sq = (diffs ** 2).sum(axis=-1)                 # (M, N)
+        nn_idx = nn_sq.argmin(axis=1)                     # (M,)
+        nn_dist = np.sqrt(nn_sq[np.arange(len(pts)), nn_idx])
+
+        mask = nn_dist < 2.0
+        if mask.sum() < 5:
+            break
+
+        s = pts[mask]
+        d = ref[nn_idx[mask]]
+        sc, dc = s.mean(0), d.mean(0)
+
+        # SVD-based optimal 2-D rotation + translation
+        U, _, Vt = np.linalg.svd((s - sc).T @ (d - dc))
+        R = Vt.T @ U.T
+        if np.linalg.det(R) < 0:          # reflection guard
+            Vt[-1] *= -1
+            R = Vt.T @ U.T
+        t = dc - R @ sc
+
+        pts = (R @ pts.T).T + t
+
+        # Compose incremental transform into accumulator
+        t_acc = R @ t_acc + t
+        R_acc = R @ R_acc
+
+        if float(np.hypot(t[0], t[1])) < 0.003:   # converged
+            break
+
+    return float(np.linalg.norm(t_acc))
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,6 +99,13 @@ def parse_args() -> argparse.Namespace:
     extract.add_argument("--workspace", required=True)
     extract.add_argument("--topic", default="")
     extract.add_argument("--frame-step", type=int, default=5)
+    extract.add_argument(
+        "--min-travel-m",
+        type=float,
+        default=0.0,
+        help="keep a frame only when the vehicle has moved >= this many metres since the last kept frame "
+             "(uses point-cloud centroid shift as proxy); overrides --frame-step when > 0",
+    )
     extract.add_argument(
         "--range",
         nargs=6,
@@ -40,6 +120,13 @@ def parse_args() -> argparse.Namespace:
     package.add_argument("--topic", default="")
     package.add_argument("--frame-step", type=int, default=5)
     package.add_argument("--group-size", type=int, default=20)
+    package.add_argument(
+        "--min-travel-m",
+        type=float,
+        default=0.0,
+        help="keep a frame only when the vehicle has moved >= this many metres since the last kept frame "
+             "(uses point-cloud centroid shift as proxy); overrides --frame-step when > 0",
+    )
     package.add_argument(
         "--append",
         action="store_true",
@@ -102,10 +189,12 @@ def cmd_extract(args: argparse.Namespace) -> None:
         with Reader(bag_path) as reader:
             connections_meta = [(connection.topic, connection.msgtype) for connection in reader.connections]
 
+    min_travel_m = max(0.0, float(args.min_travel_m))
     frame_count = 0
     valid_frame_count = 0
     skipped = 0
     started = time.time()
+    last_kept_points: np.ndarray | None = None
     with Reader(bag_path) as reader:
         for connection, _, rawdata in reader.messages():
             if connection.topic != topic:
@@ -141,7 +230,12 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
             valid_index = valid_frame_count
             valid_frame_count += 1
-            if valid_index % frame_step != 0:
+
+            if min_travel_m > 0.0:
+                if last_kept_points is not None and _estimate_travel_m(last_kept_points, points) < min_travel_m:
+                    continue
+                last_kept_points = points
+            elif valid_index % frame_step != 0:
                 continue
 
             write_pcd_binary(pcd_dir / f"{frame_count:07d}.pcd", points)
@@ -155,7 +249,8 @@ def cmd_extract(args: argparse.Namespace) -> None:
         "topic": topic,
         "frame_count": frame_count,
         "valid_frame_count": valid_frame_count,
-        "frame_step": frame_step,
+        "frame_step": frame_step if min_travel_m == 0.0 else None,
+        "min_travel_m": min_travel_m if min_travel_m > 0.0 else None,
         "skipped": skipped,
         "created_at_ms": int(time.time() * 1000),
     }
@@ -241,6 +336,7 @@ def cmd_package_groups(args: argparse.Namespace) -> None:
     output_root = Path(args.output_root).expanduser().resolve()
     frame_step = max(1, int(args.frame_step))
     group_size = max(1, int(args.group_size))
+    min_travel_m = max(0.0, float(args.min_travel_m))
     append_mode = bool(args.append)
 
     if not bag_path.exists():
@@ -328,6 +424,7 @@ def cmd_package_groups(args: argparse.Namespace) -> None:
     valid_frame_count = 0
     skipped = 0
     started = time.time()
+    last_kept_points: np.ndarray | None = None
     processed_topic_messages = 0
     last_progress_emit = 0.0
     groups: list[dict] = [dict(group) for group in existing_groups]
@@ -414,7 +511,13 @@ def cmd_package_groups(args: argparse.Namespace) -> None:
 
             valid_index = valid_frame_count
             valid_frame_count += 1
-            if valid_index % frame_step != 0:
+
+            if min_travel_m > 0.0:
+                if last_kept_points is not None and _estimate_travel_m(last_kept_points, points) < min_travel_m:
+                    maybe_emit_progress()
+                    continue
+                last_kept_points = points
+            elif valid_index % frame_step != 0:
                 maybe_emit_progress()
                 continue
 
@@ -465,7 +568,8 @@ def cmd_package_groups(args: argparse.Namespace) -> None:
         "output_root": str(output_root),
         "bag_path": str(bag_path),
         "topic": topic,
-        "frame_step": frame_step,
+        "frame_step": frame_step if min_travel_m == 0.0 else None,
+        "min_travel_m": min_travel_m if min_travel_m > 0.0 else None,
         "group_size": group_size,
         "frame_count": int(existing_meta["frame_count"]) + appended_frame_count,
         "valid_frame_count": int(existing_meta["valid_frame_count"]) + valid_frame_count,
@@ -617,8 +721,7 @@ def parse_pointcloud2(msg) -> np.ndarray | None:
                 offset, dtype_id = fields[actual_name]
                 points[index, field_index] = struct.unpack_from(fmt_map.get(dtype_id, "f"), payload, base + offset)[0]
 
-    valid = np.isfinite(points).all(axis=1)
-    return points[valid].astype(np.float32)
+    return sanitize_points(points)
 
 
 def write_pcd_binary(path: Path, points: np.ndarray) -> None:
@@ -667,7 +770,7 @@ def read_pcd_points(path: Path) -> np.ndarray:
         out[:, 2] = values[:, offsets["z"]]
         if intensity_name in offsets:
             out[:, 3] = values[:, offsets[intensity_name]]
-        return out
+        return sanitize_points(out)
 
     dtype_fields = []
     for field, size, field_type, count in zip(fields, sizes, types, counts):
@@ -685,7 +788,7 @@ def read_pcd_points(path: Path) -> np.ndarray:
     out[:, 2] = np.asarray(structured[lowered["z"]], dtype=np.float32).reshape(-1)
     if intensity_name in lowered:
         out[:, 3] = np.asarray(structured[lowered[intensity_name]], dtype=np.float32).reshape(-1)
-    return out
+    return sanitize_points(out)
 
 
 def parse_pcd_header(payload: bytes) -> tuple[int, dict[str, str]]:
@@ -756,7 +859,32 @@ def load_annotation(workspace: Path, frame_id: str) -> dict:
             "boxes": [],
             "updated_at_ms": 0,
         }
-    return json.loads(path.read_text(encoding="utf-8"))
+    annotation = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(annotation, dict):
+        return {
+            "frame_id": frame_id,
+            "source": "manual",
+            "review_status": "unreviewed",
+            "boxes": [],
+            "updated_at_ms": 0,
+        }
+
+    changed = False
+    for item in annotation.get("boxes", []) if isinstance(annotation.get("boxes"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        raw_name = item.get("class_name")
+        if not isinstance(raw_name, str):
+            continue
+        normalized = raw_name.strip()
+        lowered = normalized.lower()
+        if lowered == "cone" or lowered == "cone_big" or lowered.startswith("cone_"):
+            if normalized != "Cone":
+                item["class_name"] = "Cone"
+                changed = True
+    if changed:
+        path.write_text(json.dumps(annotation, indent=2), encoding="utf-8")
+    return annotation
 
 
 def write_label_file(path: Path, annotation: dict) -> None:
@@ -765,7 +893,9 @@ def write_label_file(path: Path, annotation: dict) -> None:
         center = item["center_xyz"]
         size = item["size_lwh"]
         yaw = item.get("yaw", 0.0)
-        class_name = item["class_name"]
+        raw_name = str(item.get("class_name") or "").strip()
+        lowered = raw_name.lower()
+        class_name = "Cone" if lowered == "cone" or lowered == "cone_big" or lowered.startswith("cone_") else raw_name
         lines.append(
             f"{float(center[0]):.6f} {float(center[1]):.6f} {float(center[2]):.6f} "
             f"{float(size[0]):.6f} {float(size[1]):.6f} {float(size[2]):.6f} "

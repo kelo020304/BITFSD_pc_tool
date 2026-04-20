@@ -1,11 +1,10 @@
 DATASET: 'CustomDataset'
 DATA_PATH: '__BITFSD_RUNTIME_DATA_PATH__'
 
-POINT_CLOUD_RANGE: [-10.24, -20.48, -1.0, 40.96, 20.48, 1.5]
+POINT_CLOUD_RANGE: [0, -51.2, -2.0, 51.2, 51.2, 0.5]
 
 MAP_CLASS_TO_KITTI: {
-    'Cone_Blue': 'Pedestrian',
-    'Cone_Red': 'Pedestrian',
+    'Cone': 'Pedestrian',
 }
 
 DATA_SPLIT: {
@@ -32,9 +31,9 @@ DATA_AUGMENTOR:
           DB_INFO_PATH:
               - custom_dbinfos_train.pkl
           PREPARE: {
-             filter_by_min_points: ['Cone_Blue:2', 'Cone_Red:2'],
+             filter_by_min_points: ['Cone:2'],
           }
-          SAMPLE_GROUPS: ['Cone_Blue:10', 'Cone_Red:10']
+          SAMPLE_GROUPS: ['Cone:10']
           NUM_POINT_FEATURES: 4
           DATABASE_WITH_FAKELIDAR: False
           REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
@@ -60,9 +59,9 @@ DATA_PROCESSOR:
       }
 
     - NAME: transform_points_to_voxels
-      VOXEL_SIZE: [0.08, 0.08, 2.5]
-      MAX_POINTS_PER_VOXEL: 16
+      VOXEL_SIZE: [0.04, 0.04, 2.5]
+      MAX_POINTS_PER_VOXEL: 32
       MAX_NUMBER_OF_VOXELS: {
-        'train': 40000,
-        'test': 40000
+        'train': 150000,
+        'test': 150000
       }

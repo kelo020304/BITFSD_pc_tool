@@ -4,7 +4,10 @@ import type {
   FrameAnnotation,
   FrameData,
   FrameSummary,
+  ModelTestSnapshot,
   TaskRecord,
+  TrainingFrameData,
+  TrainingInferenceResult,
   TrainingSnapshot,
   TrainingTargetInfo,
   WorkspaceSettings,
@@ -13,29 +16,12 @@ import type {
 } from "./types";
 
 // ---------------------------------------------------------------------------
-// Detect runtime: Tauri (desktop) vs plain browser (web)
-// ---------------------------------------------------------------------------
-
-const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-let tauriInvoke: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
-
-if (IS_TAURI) {
-  import("@tauri-apps/api/core").then((mod) => {
-    tauriInvoke = mod.invoke;
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Unified call helper
 // ---------------------------------------------------------------------------
 
 const API_BASE = "/api";
 
 async function call<T>(endpoint: string, args: Record<string, unknown> = {}): Promise<T> {
-  if (IS_TAURI && tauriInvoke) {
-    return tauriInvoke(`${endpoint}_cmd`, args) as Promise<T>;
-  }
   const resp = await fetch(`${API_BASE}/${endpoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -66,6 +52,92 @@ export function inspectTrainingTarget(path: string) {
 
 export function openTrainingRoot(rootPath: string) {
   return call<TrainingSnapshot>("open_training_root", { root_path: rootPath });
+}
+
+export function openModelTestRoot(rootPath: string) {
+  return call<ModelTestSnapshot>("open_model_test_root", { root_path: rootPath });
+}
+
+export function listTrainingFrames(datasetPath: string) {
+  return call<string[]>("list_training_frames", { dataset_path: datasetPath });
+}
+
+export function listModelTestFrames(sourcePath: string, sourceKind: "workspace" | "training_dataset") {
+  return call<string[]>("list_model_test_frames", { source_path: sourcePath, source_kind: sourceKind });
+}
+
+export function loadTrainingFrame(
+  datasetPath: string,
+  frameId: string,
+  maxPoints = 180000,
+  viewRange?: [number, number, number, number, number, number],
+) {
+  return call<TrainingFrameData>("load_training_frame", {
+    dataset_path: datasetPath,
+    frame_id: frameId,
+    max_points: maxPoints,
+    view_range: viewRange ?? null,
+  });
+}
+
+export function loadModelTestFrame(
+  sourcePath: string,
+  sourceKind: "workspace" | "training_dataset",
+  frameId: string,
+  maxPoints = 180000,
+  viewRange?: [number, number, number, number, number, number],
+) {
+  return call<TrainingFrameData>("load_model_test_frame", {
+    source_path: sourcePath,
+    source_kind: sourceKind,
+    frame_id: frameId,
+    max_points: maxPoints,
+    view_range: viewRange ?? null,
+  });
+}
+
+export function inferTrainingFrame(args: {
+  rootPath: string;
+  datasetPath: string;
+  frameId: string;
+  checkpointPath?: string;
+  modelConfigPath?: string;
+  openpcdetRoot?: string;
+  pythonBin?: string;
+  scoreThreshold?: number;
+}) {
+  return call<TrainingInferenceResult>("infer_training_frame", {
+    root_path: args.rootPath,
+    dataset_path: args.datasetPath,
+    frame_id: args.frameId,
+    checkpoint_path: args.checkpointPath ?? "",
+    model_config_path: args.modelConfigPath ?? "",
+    openpcdet_root: args.openpcdetRoot ?? "",
+    python_bin: args.pythonBin ?? "",
+    score_threshold: args.scoreThreshold ?? null,
+  });
+}
+
+export function inferModelTestFrame(args: {
+  sourcePath: string;
+  sourceKind: "workspace" | "training_dataset";
+  frameId: string;
+  checkpointPath?: string;
+  modelConfigPath?: string;
+  openpcdetRoot?: string;
+  pythonBin?: string;
+  scoreThreshold?: number;
+}) {
+  return call<TrainingInferenceResult>("infer_model_test_frame", {
+    source_path: args.sourcePath,
+    source_kind: args.sourceKind,
+    frame_id: args.frameId,
+    checkpoint_path: args.checkpointPath ?? "",
+    model_config_path: args.modelConfigPath ?? "",
+    openpcdet_root: args.openpcdetRoot ?? "",
+    python_bin: args.pythonBin ?? "",
+    score_threshold: args.scoreThreshold ?? null,
+  });
 }
 
 export function loadFrame(
@@ -99,14 +171,11 @@ export function saveTrainingSettings(rootPath: string, settings: WorkspaceSettin
 }
 
 export function pickDirectory(_initialPath?: string | null): Promise<string | null> {
-  // No native dialog in web mode — return null, UI uses text input instead
-  if (!IS_TAURI) return Promise.resolve(null);
-  return call<string | null>("pick_directory", { initialPath: _initialPath ?? null });
+  return Promise.resolve(null);
 }
 
 export function pickRosbagDirectory(_initialPath?: string | null): Promise<string | null> {
-  if (!IS_TAURI) return Promise.resolve(null);
-  return call<string | null>("pick_rosbag_directory", { initialPath: _initialPath ?? null });
+  return Promise.resolve(null);
 }
 
 export function listTasks(workspacePath: string) {
@@ -163,6 +232,7 @@ export function packageGroups(
     topic?: string;
     frameStep?: number;
     groupSize?: number;
+    minTravelM?: number;
     replaceExisting?: boolean;
   } = {},
 ) {
@@ -172,6 +242,7 @@ export function packageGroups(
     topic: options.topic ?? null,
     frame_step: options.frameStep ?? 5,
     group_size: options.groupSize ?? 20,
+    min_travel_m: options.minTravelM ?? 0.0,
     replace_existing: options.replaceExisting ?? true,
   });
 }
@@ -180,10 +251,19 @@ export function trainSeed(workspacePath: string) {
   return call<TaskRecord>("train_seed", { workspace_path: workspacePath });
 }
 
-export function trainOpenpcdet(rootPath: string) {
-  return call<TaskRecord>("train_openpcdet", { root_path: rootPath });
+export function trainOpenpcdet(rootPath: string, taskName?: string) {
+  return call<TaskRecord>("train_openpcdet", { root_path: rootPath, task_name: taskName ?? "" });
 }
 
-export function inferRange(workspacePath: string, frameIds: string[]) {
-  return call<TaskRecord>("infer_range", { workspace_path: workspacePath, frame_ids: frameIds });
+export function controlTask(workspacePath: string, taskId: string, action: "pause" | "resume" | "stop") {
+  return call<TaskRecord>("control_task", { workspace_path: workspacePath, task_id: taskId, action });
+}
+
+export function inferRange(workspacePath: string, frameIds: string[], checkpointPath?: string, scoreThreshold?: number) {
+  return call<TaskRecord>("infer_range", {
+    workspace_path: workspacePath,
+    frame_ids: frameIds,
+    checkpoint_path: checkpointPath ?? "",
+    score_threshold: scoreThreshold ?? null,
+  });
 }

@@ -140,15 +140,9 @@ pub struct PredictionFrame {
 pub fn default_classes() -> Vec<ClassDefinition> {
     vec![
         ClassDefinition {
-            id: "cone_blue".to_string(),
-            name: "Cone_Blue".to_string(),
-            color: "#0066FF".to_string(),
-            default_size: [0.228, 0.228, 0.325],
-        },
-        ClassDefinition {
-            id: "cone_red".to_string(),
-            name: "Cone_Red".to_string(),
-            color: "#FF3030".to_string(),
+            id: "cone".to_string(),
+            name: "Cone".to_string(),
+            color: "#FF9F1C".to_string(),
             default_size: [0.228, 0.228, 0.325],
         },
     ]

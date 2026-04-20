@@ -7,6 +7,7 @@ import argparse
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,8 +16,16 @@ from typing import Any
 
 import numpy as np
 import yaml
+from point_cloud_utils import sanitize_points
 
 PROGRESS_MARKER = "@@progress@@ "
+TRAIN_LOG_RE = re.compile(
+    r"Train:\s+(?P<epoch>\d+)\s*/\s*(?P<total_epochs>\d+)\s+\(\s*(?P<epoch_percent>[\d.]+)%\)\s+"
+    r"\[\s*(?P<iter>\d+)\s*/\s*(?P<iters_per_epoch>\d+)\s+\(\s*(?P<iter_percent>[\d.]+)%\)\]\s+"
+    r"Loss:\s+(?P<loss>[-+0-9.eE]+)\s+\((?P<loss_avg>[-+0-9.eE]+)\)\s+"
+    r"LR:\s+(?P<lr>[-+0-9.eE]+)\s+"
+    r"Time cost:\s+(?P<epoch_elapsed>\S+)/(?P<epoch_remaining>\S+)\s+\[(?P<elapsed>\S+)/(?P<remaining>\S+)\]"
+)
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -41,6 +50,67 @@ def emit_progress(stage: str, label: str, percent: float | None = None, **payloa
         body["percent"] = percent
     body.update(payload)
     print(f"{PROGRESS_MARKER}{json.dumps(body, ensure_ascii=False)}", flush=True)
+
+
+def parse_duration_seconds(text: str) -> int | None:
+    parts = text.strip().split(":")
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    total = 0
+    for part in parts:
+        total = total * 60 + int(part)
+    return total
+
+
+def safe_float(text: str) -> float | None:
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def parse_training_log_progress(line: str) -> dict[str, object] | None:
+    matched = TRAIN_LOG_RE.search(line)
+    if not matched:
+        return None
+
+    epoch = int(matched.group("epoch"))
+    total_epochs = max(1, int(matched.group("total_epochs")))
+    iter_index = int(matched.group("iter"))
+    iters_per_epoch = max(1, int(matched.group("iters_per_epoch")))
+    iter_completed = min(iters_per_epoch, iter_index + 1)
+    train_fraction = ((epoch - 1) + (iter_completed / iters_per_epoch)) / total_epochs
+    epoch_fraction = iter_completed / iters_per_epoch
+    return {
+        "stage": "train",
+        "label": f"Epoch {epoch}/{total_epochs}  Iter {iter_completed}/{iters_per_epoch}",
+        "percent": 62 + train_fraction * 36,
+        "train_percent": train_fraction * 100,
+        "epoch_percent": epoch_fraction * 100,
+        "epoch": epoch,
+        "total_epochs": total_epochs,
+        "iter": iter_completed,
+        "iters_per_epoch": iters_per_epoch,
+        "loss": safe_float(matched.group("loss")),
+        "loss_avg": safe_float(matched.group("loss_avg")),
+        "lr": safe_float(matched.group("lr")),
+        "elapsed_seconds": parse_duration_seconds(matched.group("elapsed")),
+        "eta_seconds": parse_duration_seconds(matched.group("remaining")),
+        "epoch_elapsed_seconds": parse_duration_seconds(matched.group("epoch_elapsed")),
+        "epoch_eta_seconds": parse_duration_seconds(matched.group("epoch_remaining")),
+    }
+
+
+def emit_training_progress_from_log(line: str) -> None:
+    progress = parse_training_log_progress(line)
+    if progress is not None:
+        emit_progress(progress.pop("stage"), progress.pop("label"), progress.pop("percent"), **progress)
+        return
+
+    if "Start evaluation" in line:
+        emit_progress("eval", "训练完成，正在评估结果", 99)
+    elif "End evaluation" in line:
+        emit_progress("finished", "训练与评估完成", 100)
 
 
 def is_openpcdet_dataset_dir(path: Path) -> bool:
@@ -159,8 +229,9 @@ def parse_label_line(line: str) -> tuple[str, list[float]] | None:
     return parts[7], box
 
 
-def collect_class_stats(samples: list[dict[str, Any]]) -> tuple[list[str], dict[str, list[float]]]:
+def collect_class_stats(samples: list[dict[str, Any]]) -> tuple[list[str], dict[str, list[float]], dict[str, float]]:
     dimensions: dict[str, list[list[float]]] = {}
+    bottom_heights: dict[str, list[float]] = {}
     for sample in samples:
         label_path = Path(sample["label_path"])
         for raw_line in label_path.read_text(encoding="utf-8").splitlines():
@@ -169,6 +240,7 @@ def collect_class_stats(samples: list[dict[str, Any]]) -> tuple[list[str], dict[
                 continue
             class_name, box = parsed
             dimensions.setdefault(class_name, []).append(box[3:6])
+            bottom_heights.setdefault(class_name, []).append(float(box[2]) - float(box[5]) / 2.0)
 
     if not dimensions:
         raise SystemExit("no labeled boxes found in the selected dataset root")
@@ -178,7 +250,11 @@ def collect_class_stats(samples: list[dict[str, Any]]) -> tuple[list[str], dict[
         class_name: np.median(np.asarray(values, dtype=np.float32), axis=0).astype(float).tolist()
         for class_name, values in dimensions.items()
     }
-    return class_names, anchor_sizes
+    anchor_bottom_heights = {
+        class_name: float(np.median(np.asarray(values, dtype=np.float32)))
+        for class_name, values in bottom_heights.items()
+    }
+    return class_names, anchor_sizes, anchor_bottom_heights
 
 
 def symlink_or_copy(source: Path, target: Path) -> None:
@@ -189,6 +265,27 @@ def symlink_or_copy(source: Path, target: Path) -> None:
         os.symlink(source, target)
     except OSError:
         shutil.copy2(source, target)
+
+
+def write_runtime_points_file(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    points = sanitize_points(np.load(source).astype(np.float32))
+    np.save(target, points.astype(np.float32, copy=False))
+
+
+def rewrite_label_file_with_zero_yaw(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for raw_line in source.read_text(encoding="utf-8").splitlines():
+        parsed = parse_label_line(raw_line)
+        if parsed is None:
+            continue
+        class_name, box = parsed
+        x, y, z, l, w, h, _yaw = box
+        lines.append(
+            f"{x:.6f} {y:.6f} {z:.6f} {l:.6f} {w:.6f} {h:.6f} 0.000000 {class_name}"
+        )
+    target.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 def prepare_runtime_dataset(
@@ -212,8 +309,8 @@ def prepare_runtime_dataset(
 
     for sample in samples:
         sample_id = str(sample["sample_id"])
-        symlink_or_copy(Path(sample["points_path"]), points_dir / f"{sample_id}.npy")
-        symlink_or_copy(Path(sample["label_path"]), labels_dir / f"{sample_id}.txt")
+        write_runtime_points_file(Path(sample["points_path"]), points_dir / f"{sample_id}.npy")
+        rewrite_label_file_with_zero_yaw(Path(sample["label_path"]), labels_dir / f"{sample_id}.txt")
 
     (imagesets_dir / "all.txt").write_text("\n".join(all_ids) + ("\n" if all_ids else ""), encoding="utf-8")
     (imagesets_dir / "train.txt").write_text(
@@ -230,6 +327,7 @@ def prepare_runtime_dataset(
         "sample_count": len(samples),
         "train_count": len(train_ids),
         "val_count": len(val_ids),
+        "label_yaw_policy": "force_zero",
         "samples": [{"sample_id": sample["sample_id"], "group_id": sample["group_id"], "frame_id": sample["frame_id"]} for sample in samples],
     }
     (runtime_dataset_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -273,12 +371,17 @@ def build_runtime_dataset_cfg(
     output_path.write_text(yaml.safe_dump(dataset_cfg, sort_keys=False), encoding="utf-8")
 
 
-def build_anchor_template(class_name: str, anchor_size: list[float], template: dict[str, Any] | None) -> dict[str, Any]:
+def build_anchor_template(
+    class_name: str,
+    anchor_size: list[float],
+    anchor_bottom_height: float,
+    template: dict[str, Any] | None,
+) -> dict[str, Any]:
     config = copy.deepcopy(template) if isinstance(template, dict) else {
         "class_name": class_name,
         "anchor_sizes": [anchor_size],
         "anchor_rotations": [0],
-        "anchor_bottom_heights": [0.0],
+        "anchor_bottom_heights": [anchor_bottom_height],
         "align_center": False,
         "feature_map_stride": 2,
         "matched_threshold": 0.35,
@@ -286,6 +389,7 @@ def build_anchor_template(class_name: str, anchor_size: list[float], template: d
     }
     config["class_name"] = class_name
     config["anchor_sizes"] = [anchor_size]
+    config["anchor_bottom_heights"] = [anchor_bottom_height]
     return config
 
 
@@ -295,22 +399,47 @@ def build_runtime_model_cfg(
     runtime_dataset_cfg_path: Path,
     class_names: list[str],
     anchor_sizes: dict[str, list[float]],
+    anchor_bottom_heights: dict[str, float],
 ) -> None:
     model_cfg = ensure_mapping(yaml.safe_load(base_cfg_path.read_text(encoding="utf-8")))
     model_cfg["CLASS_NAMES"] = class_names
+    runtime_dataset_cfg = ensure_mapping(yaml.safe_load(runtime_dataset_cfg_path.read_text(encoding="utf-8")))
+    point_cloud_range = runtime_dataset_cfg.get("POINT_CLOUD_RANGE")
 
     data_config = ensure_mapping(model_cfg.get("DATA_CONFIG"))
     data_config["_BASE_CONFIG_"] = str(runtime_dataset_cfg_path)
     model_cfg["DATA_CONFIG"] = data_config
 
     dense_head = ensure_mapping(ensure_mapping(model_cfg.get("MODEL")).get("DENSE_HEAD"))
-    anchor_generator = dense_head.get("ANCHOR_GENERATOR_CONFIG")
-    base_template = anchor_generator[0] if isinstance(anchor_generator, list) and anchor_generator else None
-    if dense_head:
-        dense_head["ANCHOR_GENERATOR_CONFIG"] = [
-            build_anchor_template(class_name, anchor_sizes[class_name], base_template) for class_name in class_names
-        ]
+    dense_head_name = str(dense_head.get("NAME") or "")
+    if dense_head_name == "CenterHead":
+        dense_head["CLASS_NAMES_EACH_HEAD"] = [list(class_names)]
+        dense_post = ensure_mapping(dense_head.get("POST_PROCESSING"))
+        if isinstance(point_cloud_range, list) and len(point_cloud_range) == 6:
+            dense_post["POST_CENTER_LIMIT_RANGE"] = list(point_cloud_range)
+        if "SCORE_THRESH" not in dense_post:
+            dense_post["SCORE_THRESH"] = 0.05
+        dense_head["POST_PROCESSING"] = dense_post
         model_cfg["MODEL"]["DENSE_HEAD"] = dense_head
+    else:
+        anchor_generator = dense_head.get("ANCHOR_GENERATOR_CONFIG")
+        base_template = anchor_generator[0] if isinstance(anchor_generator, list) and anchor_generator else None
+        if dense_head:
+            dense_head["ANCHOR_GENERATOR_CONFIG"] = [
+                build_anchor_template(
+                    class_name,
+                    anchor_sizes[class_name],
+                    anchor_bottom_heights[class_name],
+                    base_template,
+                )
+                for class_name in class_names
+            ]
+            model_cfg["MODEL"]["DENSE_HEAD"] = dense_head
+
+    model_post = ensure_mapping(ensure_mapping(model_cfg.get("MODEL")).get("POST_PROCESSING"))
+    if "SCORE_THRESH" in model_post:
+        model_post["SCORE_THRESH"] = min(float(model_post.get("SCORE_THRESH") or 0.05), 0.05)
+        model_cfg["MODEL"]["POST_PROCESSING"] = model_post
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(yaml.safe_dump(model_cfg, sort_keys=False), encoding="utf-8")
@@ -361,7 +490,22 @@ def create_infos(
 
 def run_command(command: list[str], cwd: Path) -> None:
     print("[exec]", " ".join(command))
-    process = subprocess.Popen(command, cwd=str(cwd))
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+        env=env,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="")
+        emit_training_progress_from_log(line)
     return_code = process.wait()
     if return_code != 0:
         raise SystemExit(return_code)
@@ -403,14 +547,21 @@ def main() -> None:
     runtime_manifest = prepare_runtime_dataset(runtime_dataset_dir, samples, train_ids, val_ids)
 
     emit_progress("analyze", "正在统计类别与 anchor 尺寸", 35, sample_count=len(samples))
-    class_names, anchor_sizes = collect_class_stats(samples)
+    class_names, anchor_sizes, anchor_bottom_heights = collect_class_stats(samples)
 
     emit_progress("config", "正在生成 OpenPCDet 运行配置", 45, class_count=len(class_names))
     runtime_cfg_dir = runtime_dir / "configs"
     runtime_dataset_cfg_path = runtime_cfg_dir / "dataset.yaml"
     runtime_model_cfg_path = runtime_cfg_dir / "model.yaml"
     build_runtime_dataset_cfg(dataset_cfg_path, runtime_dataset_cfg_path, runtime_dataset_dir, class_names)
-    build_runtime_model_cfg(model_cfg_path, runtime_model_cfg_path, runtime_dataset_cfg_path, class_names, anchor_sizes)
+    build_runtime_model_cfg(
+        model_cfg_path,
+        runtime_model_cfg_path,
+        runtime_dataset_cfg_path,
+        class_names,
+        anchor_sizes,
+        anchor_bottom_heights,
+    )
 
     workers = parse_workers(train_args)
     emit_progress("infos", "正在生成 infos 与 gt database", 60, workers=workers)
@@ -429,14 +580,16 @@ def main() -> None:
         "frame_count": len(samples),
         "train_count": len(train_ids),
         "val_count": len(val_ids),
+        "label_yaw_policy": "force_zero",
         "class_names": class_names,
         "anchor_sizes": anchor_sizes,
+        "anchor_bottom_heights": anchor_bottom_heights,
         "runtime_manifest": runtime_manifest,
         "runtime_model_cfg_path": str(runtime_model_cfg_path),
     }
     (runtime_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    emit_progress("train", "OpenPCDet 开始训练", 75, config_path=str(runtime_model_cfg_path))
+    emit_progress("train", "OpenPCDet 开始训练", 62, config_path=str(runtime_model_cfg_path))
     command = [
         args.python_bin,
         "tools/train.py",

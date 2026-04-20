@@ -34,7 +34,7 @@ interface FrameCanvasProps {
 }
 
 const MAX_DISPLAY_POINTS = 240000;
-const POINT_SIZE_3D = 0.06;
+const POINT_SIZE_3D = 0.09;
 const POINT_SIZE_BEV = 4.0;
 const POINT_PICK_THRESHOLD = 0.24;
 const HOVER_INTERVAL_MS = 50;
@@ -707,7 +707,7 @@ function View3dCanvasInner({
               onClick={() => onChoosePendingClass?.(item.name)}
               style={{
                 borderColor: `${item.color}66`,
-                background: `linear-gradient(135deg, ${hexToRgba(item.color, 0.24)}, rgba(13, 17, 23, 0.94))`,
+                background: `linear-gradient(135deg, ${hexToRgba(item.color, 0.28)}, rgba(255, 255, 255, 0.95))`,
               }}
               type="button"
             >
@@ -938,20 +938,20 @@ function getHeightRange(points: PointRecord[]) {
 
 function colorizePoint(z: number, zMin: number, zMax: number, intensity: number) {
   const normalized = clamp((z - zMin) / Math.max(1e-4, zMax - zMin), 0, 1);
-  const intensityFactor = clamp(intensity / 255, 0.25, 1);
+  const intensityFactor = clamp(intensity / 255, 0.35, 1);
   const [r, g, b] = samplePalette(normalized);
-  const boost = 0.6 + intensityFactor * 0.4;
+  const boost = 0.88 + intensityFactor * 0.12;
   return [r * boost, g * boost, b * boost] as const;
 }
 
 function samplePalette(t: number) {
   const palette: Array<[number, number, number]> = [
-    [0.062, 0.046, 0.122],
-    [0.251, 0.072, 0.349],
-    [0.533, 0.103, 0.445],
-    [0.812, 0.251, 0.443],
-    [0.953, 0.553, 0.349],
-    [0.988, 0.886, 0.643],
+    [0.15, 0.22, 0.72],
+    [0.18, 0.52, 0.90],
+    [0.10, 0.80, 0.78],
+    [0.22, 0.88, 0.38],
+    [0.98, 0.88, 0.18],
+    [1.00, 1.00, 0.92],
   ];
   const scaled = t * (palette.length - 1);
   const left = Math.floor(scaled);
